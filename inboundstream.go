@@ -149,30 +149,31 @@ func (stream *inboundStream) Attach(handler InboundStreamHandler) {
 
 // Send audio data
 func (stream *inboundStream) SendAudioData(data []byte, deltaTimestamp uint32) (err error) {
-	message := NewMessage(stream.chunkStreamID-4, AUDIO_TYPE, stream.id, AUTO_TIMESTAMP, data)
-	message.Timestamp = deltaTimestamp
-	return stream.conn.Send(message)
+    return stream.SendData(AUDIO_TYPE, data, deltaTimestamp)
 }
 
 // Send video data
 func (stream *inboundStream) SendVideoData(data []byte, deltaTimestamp uint32) (err error) {
-	message := NewMessage(stream.chunkStreamID-4, VIDEO_TYPE, stream.id, AUTO_TIMESTAMP, data)
-	message.Timestamp = deltaTimestamp
-	return stream.conn.Send(message)
+    return stream.SendData(VIDEO_TYPE, data, deltaTimestamp)
 }
 
 // Send data
 func (stream *inboundStream) SendData(dataType uint8, data []byte, deltaTimestamp uint32) (err error) {
 	var csid uint32
+    streamId := stream.id
 	switch dataType {
 	case VIDEO_TYPE:
-		csid = stream.chunkStreamID - 4
+		csid = stream.chunkStreamID-4
 	case AUDIO_TYPE:
-		csid = stream.chunkStreamID - 4
+		csid = stream.chunkStreamID-4
+		//csid = CS_ID_AUDIO
+	case USER_CONTROL_MESSAGE:
+        csid = CS_ID_USER_CONTROL
+        streamId = 2
 	default:
 		csid = stream.chunkStreamID
 	}
-	message := NewMessage(csid, dataType, stream.id, AUTO_TIMESTAMP, data)
+	message := NewMessage(csid, dataType, streamId, AUTO_TIMESTAMP, data)
 	message.Timestamp = deltaTimestamp
 	return stream.conn.Send(message)
 }
@@ -212,6 +213,7 @@ func (stream *inboundStream) onRecevieVideo(cmd *Command) bool {
 	return true
 }
 func (stream *inboundStream) onCloseStream(cmd *Command) bool {
+    stream.conn.onCloseStream(stream)
 	return true
 }
 

@@ -108,12 +108,14 @@ func (ibConn *inboundConn) OnReceivedRtmpCommand(conn Conn, command *Command) {
 func (ibConn *inboundConn) OnClosed(conn Conn) {
 	ibConn.status = INBOUND_CONN_STATUS_CLOSE
 	ibConn.handler.OnStatus(ibConn)
+    ibConn.Close()
 }
 
 // Close a connection
 func (ibConn *inboundConn) Close() {
 	for _, stream := range ibConn.streams {
 		stream.Close()
+        ibConn.onCloseStream(stream)
 	}
 	time.Sleep(time.Second)
 	ibConn.status = INBOUND_CONN_STATUS_CLOSE

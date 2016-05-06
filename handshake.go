@@ -224,6 +224,7 @@ func Handshake(c net.Conn, br *bufio.Reader, bw *bufio.Writer, timeout time.Dura
 	//		return errors.New(fmt.Sprintf("FMS version is %d.%d.%d.%d, unsupported!", s1[4], s1[5], s1[6], s1[7]))
 	//	}
 
+    fmt.Printf("The freaking handshake... s1 %d.%d.%d.%d\n", s1[4],s1[5],s1[6],s1[7])
 	// Read S2
 	if timeout > 0 {
 		c.SetReadDeadline(time.Now().Add(timeout))
@@ -321,6 +322,7 @@ func SHandshake(c net.Conn, br *bufio.Reader, bw *bufio.Writer, timeout time.Dur
 		return errors.New(fmt.Sprintf("SHandshake() Got C0: %x", c0))
 	}
 
+    fmt.Printf("The freaking handshake... c0 %d\n",  c0);
 	// Read C1
 	c1 := make([]byte, RTMP_SIG_SIZE)
 	if timeout > 0 {
@@ -330,29 +332,42 @@ func SHandshake(c net.Conn, br *bufio.Reader, bw *bufio.Writer, timeout time.Dur
 	CheckError(err, "SHandshake Read C1")
 	logger.ModulePrintf(logHandler, log.LOG_LEVEL_DEBUG,
 		"SHandshake() Flash player version is %d.%d.%d.%d", c1[4], c1[5], c1[6], c1[7])
-
+    fmt.Printf("The freaking handshake... c1 %d.%d.%d.%d\n", c1[4],c1[5],c1[6],c1[7])
 	scheme := 0
+    oldHandshake := false
 	clientDigestOffset := ValidateDigest(c1, 8, GENUINE_FP_KEY[:30])
 	if clientDigestOffset == 0 {
 		clientDigestOffset = ValidateDigest(c1, 772, GENUINE_FP_KEY[:30])
 		if clientDigestOffset == 0 {
-			return errors.New("SHandshake C1 validating failed")
+            //nginx decided if digest is not found, just continue with the rest
+			//return errors.New("SHandshake C1 validating failed")
+            logger.ModulePrintf(logHandler, log.LOG_LEVEL_WARNING,
+                "digest not found")
+            oldHandshake = true;
 		}
 		scheme = 1
 	}
-	logger.ModulePrintf(logHandler, log.LOG_LEVEL_DEBUG,
-		"SHandshake() scheme = %d", scheme)
-	digestResp, err := HMACsha256(c1[clientDigestOffset:clientDigestOffset+SHA256_DIGEST_LENGTH], GENUINE_FMS_KEY)
-	CheckError(err, "SHandshake Generate digestResp")
+	var s2 []byte
+    if !oldHandshake {
+        s2 = CreateRandomBlock(RTMP_SIG_SIZE)
+        logger.ModulePrintf(logHandler, log.LOG_LEVEL_DEBUG,
+            "SHandshake() scheme = %d and not oldhandshake", scheme)
+        digestResp, err := HMACsha256(c1[clientDigestOffset:clientDigestOffset+SHA256_DIGEST_LENGTH], GENUINE_FMS_KEY)
+        CheckError(err, "SHandshake Generate digestResp")
 
-	// Generate S2
-	s2 := CreateRandomBlock(RTMP_SIG_SIZE)
-	signatureResp, err := HMACsha256(s2[:RTMP_SIG_SIZE-SHA256_DIGEST_LENGTH], digestResp)
-	CheckError(err, "SHandshake Generate S2 HMACsha256 signatureResp")
-	DumpBuffer("SHandshake signatureResp", signatureResp, 0)
-	for index, b := range signatureResp {
-		s2[RTMP_SIG_SIZE-SHA256_DIGEST_LENGTH+index] = b
-	}
+        // Generate S2
+        signatureResp, err := HMACsha256(s2[:RTMP_SIG_SIZE-SHA256_DIGEST_LENGTH], digestResp)
+        CheckError(err, "SHandshake Generate S2 HMACsha256 signatureResp")
+        DumpBuffer("SHandshake signatureResp", signatureResp, 0)
+        for index, b := range signatureResp {
+            s2[RTMP_SIG_SIZE-SHA256_DIGEST_LENGTH+index] = b
+        }
+    } else {
+        // just echo c1
+        logger.ModulePrintf(logHandler, log.LOG_LEVEL_WARNING, "just echoing c1 len(%d)", len(c1))
+        s2 = make([]byte, RTMP_SIG_SIZE)
+        copy(s2, c1)
+    }
 
 	// Send S2
 	_, err = bw.Write(s2)

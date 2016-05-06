@@ -236,8 +236,17 @@ func (stream *outboundStream) Received(message *Message) bool {
 		return false
 	}
 	var err error
+    if message.Type == DATA_AMF0 || message.Type == DATA_AMF3{ 
+			logger.ModulePrintln(logHandler, log.LOG_LEVEL_WARNING,
+				"outboundStream::Received() DATA:", message)
+
+    }
 	if message.Type == COMMAND_AMF0 || message.Type == COMMAND_AMF3 {
 		cmd := &Command{}
+			logger.ModulePrintln(logHandler, log.LOG_LEVEL_WARNING,
+				"outboundStream::Received() :", message)
+
+
 		if message.Type == COMMAND_AMF3 {
 			cmd.IsFlex = true
 			_, err = message.Buf.ReadByte()

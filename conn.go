@@ -6,9 +6,12 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/binary"
+    "encoding/hex"
 	"errors"
 	"github.com/zhangpeihao/goamf"
 	"github.com/zhangpeihao/log"
+    "fmt"
+    "strings"
 	"io"
 	"net"
 	"sync"
@@ -145,6 +148,10 @@ func NewConn(c net.Conn, br *bufio.Reader, bw *bufio.Writer, handler ConnHandler
 	conn.outChunkStreams[CS_ID_COMMAND] = NewOutboundChunkStream(CS_ID_COMMAND)
 	// Create "User control chunk stream"
 	conn.outChunkStreams[CS_ID_USER_CONTROL] = NewOutboundChunkStream(CS_ID_USER_CONTROL)
+    conn.outChunkStreams[CS_ID_VIDEO] = NewOutboundChunkStream(CS_ID_VIDEO)
+    conn.outChunkStreams[CS_ID_AUDIO] = NewOutboundChunkStream(CS_ID_AUDIO)
+
+
 	go conn.sendLoop()
 	go conn.readLoop()
 	return conn
@@ -266,7 +273,7 @@ func (conn *conn) readLoop() {
 			if conn.err == nil {
 				conn.err = r.(error)
 				logger.ModulePrintf(logHandler, log.LOG_LEVEL_WARNING,
-					"readLoop panic:", conn.err)
+					"readLoop panic:", conn.err, r)
 			}
 		}
 		conn.Close()
@@ -365,6 +372,11 @@ func (conn *conn) readLoop() {
 			for {
 				// n64, err = CopyNFromNetwork(message.Buf, conn.br, int64(remain))
 				n64, err = io.CopyN(message.Buf, conn.br, int64(remain))
+                str := hex.EncodeToString(message.Buf.Bytes())
+                if strings.Contains(str, "356764") {
+                    fmt.Printf("Found the bloody thing!! %s\n", str)
+                    fmt.Printf("Found the bloody message is type(%d) csi(%d) si(%d)\n", message.Type, message.ChunkStreamID, message.StreamID)
+                }
 				if err == nil {
 					conn.inBytes += uint32(n64)
 					if remain <= uint32(n64) {

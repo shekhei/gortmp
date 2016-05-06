@@ -48,6 +48,8 @@ const (
 	CS_ID_PROTOCOL_CONTROL = uint32(2)
 	CS_ID_COMMAND          = uint32(3)
 	CS_ID_USER_CONTROL     = uint32(4)
+	CS_ID_VIDEO             = uint32(5)
+	CS_ID_AUDIO             = uint32(6)
 )
 
 // Message type
@@ -212,6 +214,8 @@ const (
 	// Each message can contain multiple events.
 	SHARED_OBJECT_AMF0 = uint8(19)
 	SHARED_OBJECT_AMF3 = uint8(16)
+
+	INFO_TYPE			= uint8(12)
 
 	// Data message
 	//
@@ -444,6 +448,13 @@ func (rtmpUrl *RtmpURL) App() string {
 	return rtmpUrl.app + "/" + rtmpUrl.instanceName
 }
 
+func (rtmpUrl *RtmpURL) Host() string {
+	return rtmpUrl.host;
+}
+
+func (rtmpUrl *RtmpURL) Port() uint16 {
+	return rtmpUrl.port;
+}
 // Dump buffer
 func DumpBuffer(name string, data []byte, ind int) {
 	if logger.ModuleLevelCheck(logHandler, log.LOG_LEVEL_DEBUG) {

@@ -6,7 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/zhangpeihao/goflv"
+	"github.com/shekhei/goflv"
 	rtmp "github.com/zhangpeihao/gortmp"
 	"github.com/zhangpeihao/log"
 	"io"
@@ -38,8 +38,10 @@ var status uint
 
 func (handler *TestOutboundConnHandler) OnStatus(conn rtmp.OutboundConn) {
 	var err error
+    if obConn != nil {
 	status, err = obConn.Status()
 	fmt.Printf("@@@@@@@@@@@@@status: %d, err: %v\n", status, err)
+}
 }
 
 func (handler *TestOutboundConnHandler) OnClosed(conn rtmp.Conn) {
