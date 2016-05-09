@@ -6,18 +6,17 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/binary"
-    "encoding/hex"
 	"errors"
 	"github.com/zhangpeihao/goamf"
 	"github.com/zhangpeihao/log"
-    "fmt"
-    "strings"
 	"io"
 	"net"
 	"sync"
 	"sync/atomic"
 	"time"
 )
+
+var connIdGen *IdGen = NewIdGen()
 
 // Conn
 //
@@ -28,6 +27,7 @@ type Conn interface {
 	CreateChunkStream(ID uint32) (*OutboundChunkStream, error)
 	CloseChunkStream(ID uint32)
 	NewTransactionID() uint32
+    Id() uint32
 	CreateMediaChunkStream() (*OutboundChunkStream, error)
 	CloseMediaChunkStream(id uint32)
 	SetStreamBufferSize(streamId uint32, size uint32)
@@ -118,6 +118,7 @@ type conn struct {
 
 	// Error
 	err error
+    connId uint32
 }
 
 // Create new connection
@@ -140,6 +141,7 @@ func NewConn(c net.Conn, br *bufio.Reader, bw *bufio.Writer, handler ConnHandler
 		inBandwidthLimit:            BINDWIDTH_LIMIT_DYNAMIC,
 		outBandwidthLimit:           BINDWIDTH_LIMIT_DYNAMIC,
 		handler:                     handler,
+        connId:                      <- connIdGen.Next,
 		mediaChunkStreamIDAllocator: make([]bool, maxChannelNumber),
 	}
 	// Create "Protocol control chunk stream"
@@ -155,6 +157,10 @@ func NewConn(c net.Conn, br *bufio.Reader, bw *bufio.Writer, handler ConnHandler
 	go conn.sendLoop()
 	go conn.readLoop()
 	return conn
+}
+
+func (conn *conn ) Id() (uint32){
+    return conn.connId
 }
 
 // Send high priority message in continuous chunks
@@ -372,11 +378,6 @@ func (conn *conn) readLoop() {
 			for {
 				// n64, err = CopyNFromNetwork(message.Buf, conn.br, int64(remain))
 				n64, err = io.CopyN(message.Buf, conn.br, int64(remain))
-                str := hex.EncodeToString(message.Buf.Bytes())
-                if strings.Contains(str, "356764") {
-                    fmt.Printf("Found the bloody thing!! %s\n", str)
-                    fmt.Printf("Found the bloody message is type(%d) csi(%d) si(%d)\n", message.Type, message.ChunkStreamID, message.StreamID)
-                }
 				if err == nil {
 					conn.inBytes += uint32(n64)
 					if remain <= uint32(n64) {
