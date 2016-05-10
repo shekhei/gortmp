@@ -58,10 +58,11 @@ func (chunkStream *OutboundChunkStream) NewOutboundHeader(message *Message) *Hea
 		message.Timestamp = timestamp
 		message.AbsoluteTimestamp = timestamp
 	}
-	deltaTimestamp := uint32(0)
-	if chunkStream.lastOutAbsoluteTimestamp < message.Timestamp {
-		deltaTimestamp = message.Timestamp - chunkStream.lastOutAbsoluteTimestamp
-	}
+	//deltaTimestamp := uint32(0)
+	//if chunkStream.lastOutAbsoluteTimestamp < message.Timestamp {
+	//	deltaTimestamp = message.Timestamp - chunkStream.lastOutAbsoluteTimestamp
+	//}
+    deltaTimestamp := message.Timestamp
 	if chunkStream.lastHeader == nil {
 		header.Fmt = HEADER_FMT_FULL
 		header.Timestamp = timestamp

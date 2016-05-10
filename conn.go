@@ -172,8 +172,7 @@ func (conn *conn) sendMessage(message *Message) {
 		// Error
 		return
 	}
-
-	//	message.Dump(">>>")
+	// message.Dump(">>>")
 	header := chunkStream.NewOutboundHeader(message)
 	_, err := header.Write(conn.bw)
 	if err != nil {

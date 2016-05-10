@@ -5,6 +5,7 @@ package gortmp
 import (
 	"bytes"
 	"fmt"
+    "encoding/binary"
 	"github.com/zhangpeihao/goamf"
 	"github.com/zhangpeihao/log"
 )
@@ -195,7 +196,21 @@ func (stream *inboundStream) onPlay(cmd *Command) bool {
 	}
 	// Response
 	stream.conn.conn.SetChunkSize(4096)
-	stream.conn.conn.SendUserControlMessage(EVENT_STREAM_BEGIN)
+	//stream.conn.conn.SendUserControlMessage(EVENT_STREAM_BEGIN)
+    message := NewMessage(CS_ID_PROTOCOL_CONTROL, USER_CONTROL_MESSAGE, 0, 0, nil)
+    if err := binary.Write(message.Buf, binary.BigEndian, EVENT_STREAM_BEGIN); err != nil {
+        logger.ModulePrintln(logHandler, log.LOG_LEVEL_WARNING,
+			"conn::SendUserControlMessage write event type err:", err)
+		return true
+    }
+    if err := binary.Write(message.Buf, binary.BigEndian, uint32(0)); err != nil {
+        logger.ModulePrintln(logHandler, log.LOG_LEVEL_WARNING,
+			"conn::SendUserControlMessage write event type err:", err)
+		return true
+    }
+
+    stream.conn.conn.Send(message)
+
 	stream.streamReset()
 	stream.streamStart()
 	stream.rtmpSampleAccess()
