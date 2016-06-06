@@ -31,11 +31,11 @@ func NewMessage(csi uint32, t uint8, sid uint32, ts uint32, data []byte) *Messag
 		StreamID:          sid,
 		Timestamp:         ts,
 		AbsoluteTimestamp: ts,
-		Buf:               new(bytes.Buffer),
 	}
 	if data != nil {
-		message.Buf.Write(data)
-		message.Size = uint32(len(data))
+		message.Buf = bytes.NewBuffer(data)
+	} else {
+		message.Buf = new(bytes.Buffer)
 	}
 	return message
 }

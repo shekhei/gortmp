@@ -4,8 +4,8 @@ package gortmp
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
-    "encoding/binary"
 	"github.com/zhangpeihao/goamf"
 	"github.com/zhangpeihao/log"
 )
@@ -15,6 +15,7 @@ type InboundStreamHandler interface {
 	OnPublishStart(stream InboundStream)
 	OnReceiveAudio(stream InboundStream, on bool)
 	OnReceiveVideo(stream InboundStream, on bool)
+	OnReceiveMessage(stream InboundStream, message *Message) bool
 }
 
 // Message stream:
@@ -85,9 +86,6 @@ func (stream *inboundStream) Close() {
 }
 
 func (stream *inboundStream) Received(message *Message) bool {
-	if message.Type == VIDEO_TYPE || message.Type == AUDIO_TYPE {
-		return false
-	}
 	var err error
 	if message.Type == COMMAND_AMF0 || message.Type == COMMAND_AMF3 {
 		cmd := &Command{}
@@ -141,7 +139,7 @@ func (stream *inboundStream) Received(message *Message) bool {
 		}
 
 	}
-	return false
+	return stream.handler.OnReceiveMessage(InboundStream(stream), message)
 }
 
 func (stream *inboundStream) Attach(handler InboundStreamHandler) {
@@ -150,27 +148,27 @@ func (stream *inboundStream) Attach(handler InboundStreamHandler) {
 
 // Send audio data
 func (stream *inboundStream) SendAudioData(data []byte, deltaTimestamp uint32) (err error) {
-    return stream.SendData(AUDIO_TYPE, data, deltaTimestamp)
+	return stream.SendData(AUDIO_TYPE, data, deltaTimestamp)
 }
 
 // Send video data
 func (stream *inboundStream) SendVideoData(data []byte, deltaTimestamp uint32) (err error) {
-    return stream.SendData(VIDEO_TYPE, data, deltaTimestamp)
+	return stream.SendData(VIDEO_TYPE, data, deltaTimestamp)
 }
 
 // Send data
 func (stream *inboundStream) SendData(dataType uint8, data []byte, deltaTimestamp uint32) (err error) {
 	var csid uint32
-    streamId := stream.id
+	streamId := stream.id
 	switch dataType {
 	case VIDEO_TYPE:
-		csid = stream.chunkStreamID-4
+		csid = stream.chunkStreamID - 4
 	case AUDIO_TYPE:
-		csid = stream.chunkStreamID-4
+		csid = stream.chunkStreamID - 4
 		//csid = CS_ID_AUDIO
 	case USER_CONTROL_MESSAGE:
-        csid = CS_ID_USER_CONTROL
-        streamId = 2
+		csid = CS_ID_USER_CONTROL
+		streamId = 2
 	default:
 		csid = stream.chunkStreamID
 	}
@@ -197,19 +195,19 @@ func (stream *inboundStream) onPlay(cmd *Command) bool {
 	// Response
 	stream.conn.conn.SetChunkSize(4096)
 	//stream.conn.conn.SendUserControlMessage(EVENT_STREAM_BEGIN)
-    message := NewMessage(CS_ID_PROTOCOL_CONTROL, USER_CONTROL_MESSAGE, 0, 0, nil)
-    if err := binary.Write(message.Buf, binary.BigEndian, EVENT_STREAM_BEGIN); err != nil {
-        logger.ModulePrintln(logHandler, log.LOG_LEVEL_WARNING,
+	message := NewMessage(CS_ID_PROTOCOL_CONTROL, USER_CONTROL_MESSAGE, 0, 0, nil)
+	if err := binary.Write(message.Buf, binary.BigEndian, EVENT_STREAM_BEGIN); err != nil {
+		logger.ModulePrintln(logHandler, log.LOG_LEVEL_WARNING,
 			"conn::SendUserControlMessage write event type err:", err)
 		return true
-    }
-    if err := binary.Write(message.Buf, binary.BigEndian, uint32(0)); err != nil {
-        logger.ModulePrintln(logHandler, log.LOG_LEVEL_WARNING,
+	}
+	if err := binary.Write(message.Buf, binary.BigEndian, uint32(0)); err != nil {
+		logger.ModulePrintln(logHandler, log.LOG_LEVEL_WARNING,
 			"conn::SendUserControlMessage write event type err:", err)
 		return true
-    }
+	}
 
-    stream.conn.conn.Send(message)
+	stream.conn.conn.Send(message)
 
 	stream.streamReset()
 	stream.streamStart()
@@ -219,6 +217,7 @@ func (stream *inboundStream) onPlay(cmd *Command) bool {
 }
 
 func (stream *inboundStream) onPublish(cmd *Command) bool {
+	stream.handler.OnPublishStart(stream)
 	return true
 }
 func (stream *inboundStream) onRecevieAudio(cmd *Command) bool {
@@ -228,7 +227,7 @@ func (stream *inboundStream) onRecevieVideo(cmd *Command) bool {
 	return true
 }
 func (stream *inboundStream) onCloseStream(cmd *Command) bool {
-    stream.conn.onCloseStream(stream)
+	stream.conn.onCloseStream(stream)
 	return true
 }
 

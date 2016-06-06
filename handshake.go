@@ -13,6 +13,7 @@ import (
 	"io"
 	"math/rand"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/zhangpeihao/log"
@@ -49,6 +50,25 @@ var (
 	}
 )
 
+var (
+	rtmpSigBufferPool sync.Pool
+)
+
+func newRtmpSigByteSlice() []byte{
+	pool := rtmpSigBufferPool
+	size := RTMP_SIG_SIZE
+	if v := pool.Get(); v != nil {
+		sl := v.([]byte)
+		return sl
+	}
+	// do something perhaps to shrink the pool again
+	return make([]byte, size)
+}
+
+func putRtmpSigByteSlicePool(slice []byte) {
+	rtmpSigBufferPool.Put(slice)
+}
+
 func HMACsha256(msgBytes []byte, key []byte) ([]byte, error) {
 	h := hmac.New(sha256.New, key)
 	_, err := h.Write(msgBytes)
@@ -58,7 +78,8 @@ func HMACsha256(msgBytes []byte, key []byte) ([]byte, error) {
 	return h.Sum(nil), nil
 }
 
-func CreateRandomBlock(size uint) []byte {
+
+func CreateRandomBlock(size int, byteSlice []byte) {
 	/*
 		buf := make([]byte, size)
 		for i := uint(0); i < size; i++ {
@@ -66,21 +87,54 @@ func CreateRandomBlock(size uint) []byte {
 		}
 		return buf
 	*/
-
-	size64 := size / uint(8)
-	buf := new(bytes.Buffer)
-	var r64 int64
-	var i uint
-	for i = uint(0); i < size64; i++ {
-		r64 = rand.Int63()
-		binary.Write(buf, binary.BigEndian, &r64)
+	if cap(byteSlice) < size {
+		panic("byteSlice is too small")
 	}
-	for i = i * uint(8); i < size; i++ {
-		buf.WriteByte(byte(rand.Int()))
+	size64 := size / 8
+	// byteSlice := newRtmpSigBytee()
+	// buf := bytes.NewBuffer(byteSlice)
+	var r64 uint64
+	i := 0
+	for ; i < size64; i++ {
+		r64 = uint64(rand.Int63())
+		// binary.PutVarint(byteSlice[i*8:], r64)
+		binary.BigEndian.PutUint64(byteSlice[i*8:], r64)
+		// binary.Write(buf, binary.BigEndian, &r64)
 	}
-	return buf.Bytes()
+	for i = i * 8; i < size; i++ {
+		// byteSlice[i] = byte(rand.Int())
+		byteSlice[i] = byte(rand.Int())
+		// buf.WriteByte(byte(rand.Int()))
+	}
+	// return buf.Bytes()
 
 }
+
+// func CreateRandomBlockOld(size int) []byte {
+// 	/*
+// 		buf := make([]byte, size)
+// 		for i := uint(0); i < size; i++ {
+// 			buf[i] = byte(rand.Int() % 256)
+// 		}
+// 		return buf
+// 	*/
+// 	size64 := size / 8
+// 	// byteSlice := newRtmpSigBytee()
+// 	buf := new(bytes.Buffer)
+// 	var r64 int64
+// 	i := 0
+// 	for ; i < size64; i++ {
+// 		r64 = rand.Int63()
+// 		// binary.PutVarint(byteSlice[i*8:], r64)
+// 		binary.Write(buf, binary.BigEndian, &r64)
+// 	}
+// 	for i = i * 8; i < size; i++ {
+// 		// byteSlice[i] = byte(rand.Int())
+// 		buf.WriteByte(byte(rand.Int()))
+// 	}
+// 	return buf.Bytes()
+//
+// }
 
 func CalcDigestPos(buf []byte, offset uint32, mod_val uint32, add_val uint32) (digest_pos uint32) {
 	var i uint32
@@ -144,20 +198,26 @@ func HandshakeSample(c net.Conn, br *bufio.Reader, bw *bufio.Writer, timeout tim
 	}()
 	// Send C0+C1
 	err = bw.WriteByte(0x03)
-	c1 := CreateRandomBlock(RTMP_SIG_SIZE)
-	for i := 0; i < 8; i++ {
-		c1[i] = 0
+	{
+		// allowing c1 to be cleaned up
+		c1 := newRtmpSigByteSlice()
+		CreateRandomBlock(RTMP_SIG_SIZE, c1)
+		for i := 0; i < 8; i++ {
+			c1[i] = 0
+		}
+		bw.Write(c1)
+		err = bw.Flush()
+		putRtmpSigByteSlicePool(c1)
+		CheckError(err, "Handshake() Flush C0+C1")
 	}
-	bw.Write(c1)
-	err = bw.Flush()
-	CheckError(err, "Handshake() Flush C0+C1")
 	// Read S0+S1+S2
 	s0, err := br.ReadByte()
 	CheckError(err, "Handshake() Read S0")
 	if s0 != 0x03 {
 		return errors.New(fmt.Sprintf("Handshake() Got S0: %x", s0))
 	}
-	s1 := make([]byte, RTMP_SIG_SIZE)
+	s1 := newRtmpSigByteSlice() // reuse c1, s1 ise(l
+
 	_, err = io.ReadAtLeast(br, s1, RTMP_SIG_SIZE)
 	CheckError(err, "Handshake() Read S1")
 	bw.Write(s1)
@@ -165,6 +225,8 @@ func HandshakeSample(c net.Conn, br *bufio.Reader, bw *bufio.Writer, timeout tim
 	CheckError(err, "Handshake() Flush C2")
 	_, err = io.ReadAtLeast(br, s1, RTMP_SIG_SIZE)
 	CheckError(err, "Handshake() Read S2")
+
+	putRtmpSigByteSlicePool(s1)
 	return
 }
 
@@ -177,7 +239,9 @@ func Handshake(c net.Conn, br *bufio.Reader, bw *bufio.Writer, timeout time.Dura
 	// Send C0+C1
 	err = bw.WriteByte(0x03)
 	CheckError(err, "Handshake() Send C0")
-	c1 := CreateRandomBlock(RTMP_SIG_SIZE)
+	c1 := newRtmpSigByteSlice()
+	CreateRandomBlock(RTMP_SIG_SIZE, c1)
+	defer putRtmpSigByteSlicePool(c1)
 	// Set Timestamp
 	// binary.BigEndian.PutUint32(c1, uint32(GetTimestamp()))
 	binary.BigEndian.PutUint32(c1, uint32(0))
@@ -212,7 +276,8 @@ func Handshake(c net.Conn, br *bufio.Reader, bw *bufio.Writer, timeout time.Dura
 	}
 
 	// Read S1
-	s1 := make([]byte, RTMP_SIG_SIZE)
+	s1 := newRtmpSigByteSlice()
+	defer putRtmpSigByteSlicePool(s1)
 	if timeout > 0 {
 		c.SetReadDeadline(time.Now().Add(timeout))
 	}
@@ -228,7 +293,8 @@ func Handshake(c net.Conn, br *bufio.Reader, bw *bufio.Writer, timeout time.Dura
 	if timeout > 0 {
 		c.SetReadDeadline(time.Now().Add(timeout))
 	}
-	s2 := make([]byte, RTMP_SIG_SIZE)
+	s2 := newRtmpSigByteSlice()
+	defer putRtmpSigByteSlicePool(s2)
 	_, err = io.ReadAtLeast(br, s2, RTMP_SIG_SIZE)
 	CheckError(err, "Handshake() Read S2")
 
@@ -256,7 +322,9 @@ func Handshake(c net.Conn, br *bufio.Reader, bw *bufio.Writer, timeout time.Dura
 	digestResp, err := HMACsha256(s1[server_pos:server_pos+SHA256_DIGEST_LENGTH], GENUINE_FP_KEY)
 	CheckError(err, "Generate C2 HMACsha256 digestResp")
 
-	c2 := CreateRandomBlock(RTMP_SIG_SIZE)
+	c2 := newRtmpSigByteSlice()
+	defer putRtmpSigByteSlicePool(c2)
+	CreateRandomBlock(RTMP_SIG_SIZE, c2)
 	signatureResp, err := HMACsha256(c2[:RTMP_SIG_SIZE-SHA256_DIGEST_LENGTH], digestResp)
 	CheckError(err, "Generate C2 HMACsha256 signatureResp")
 	DumpBuffer("signatureResp", signatureResp, 0)
@@ -289,7 +357,10 @@ func SHandshake(c net.Conn, br *bufio.Reader, bw *bufio.Writer, timeout time.Dur
 	// Send S0+S1
 	err = bw.WriteByte(0x03)
 	CheckError(err, "SHandshake() Send S0")
-	s1 := CreateRandomBlock(RTMP_SIG_SIZE)
+	s1 := newRtmpSigByteSlice()
+	defer putRtmpSigByteSlicePool(s1)
+	CreateRandomBlock(RTMP_SIG_SIZE, s1)
+
 	// Set Timestamp
 	// binary.BigEndian.PutUint32(s1, uint32(GetTimestamp()))
 	binary.BigEndian.PutUint32(s1, uint32(0))
@@ -320,9 +391,11 @@ func SHandshake(c net.Conn, br *bufio.Reader, bw *bufio.Writer, timeout time.Dur
 	if c0 != 0x03 {
 		return errors.New(fmt.Sprintf("SHandshake() Got C0: %x", c0))
 	}
-	
-    // Read C1
-	c1 := make([]byte, RTMP_SIG_SIZE)
+
+	// Read C1
+	c1 := newRtmpSigByteSlice()
+	defer putRtmpSigByteSlicePool(c1)
+	// c1 := make([]byte, RTMP_SIG_SIZE)
 	if timeout > 0 {
 		c.SetReadDeadline(time.Now().Add(timeout))
 	}
@@ -331,40 +404,44 @@ func SHandshake(c net.Conn, br *bufio.Reader, bw *bufio.Writer, timeout time.Dur
 	logger.ModulePrintf(logHandler, log.LOG_LEVEL_DEBUG,
 		"SHandshake() Flash player version is %d.%d.%d.%d", c1[4], c1[5], c1[6], c1[7])
 	scheme := 0
-    oldHandshake := false
+	oldHandshake := false
 	clientDigestOffset := ValidateDigest(c1, 8, GENUINE_FP_KEY[:30])
 	if clientDigestOffset == 0 {
 		clientDigestOffset = ValidateDigest(c1, 772, GENUINE_FP_KEY[:30])
 		if clientDigestOffset == 0 {
-            //nginx decided if digest is not found, just continue with the rest
+			//nginx decided if digest is not found, just continue with the rest
 			//return errors.New("SHandshake C1 validating failed")
-            logger.ModulePrintf(logHandler, log.LOG_LEVEL_WARNING,
-                "digest not found")
-            oldHandshake = true;
+			logger.ModulePrintf(logHandler, log.LOG_LEVEL_WARNING,
+				"digest not found")
+			oldHandshake = true
 		}
 		scheme = 1
 	}
-	var s2 []byte
-    if !oldHandshake {
-        s2 = CreateRandomBlock(RTMP_SIG_SIZE)
-        logger.ModulePrintf(logHandler, log.LOG_LEVEL_DEBUG,
-            "SHandshake() scheme = %d and not oldhandshake", scheme)
-        digestResp, err := HMACsha256(c1[clientDigestOffset:clientDigestOffset+SHA256_DIGEST_LENGTH], GENUINE_FMS_KEY)
-        CheckError(err, "SHandshake Generate digestResp")
+	s2 := newRtmpSigByteSlice()
+	defer putRtmpSigByteSlicePool(s2)
+	if !oldHandshake {
+		// s2 = make([]byte, RTMP_SIG_SIZE)
+		CreateRandomBlock(RTMP_SIG_SIZE, s2)
+		logger.ModulePrintf(logHandler, log.LOG_LEVEL_DEBUG,
+			"SHandshake() scheme = %d and not oldhandshake", scheme)
+		digestResp, inErr := HMACsha256(c1[clientDigestOffset:clientDigestOffset+SHA256_DIGEST_LENGTH], GENUINE_FMS_KEY)
+		err = inErr
+		CheckError(err, "SHandshake Generate digestResp")
 
-        // Generate S2
-        signatureResp, err := HMACsha256(s2[:RTMP_SIG_SIZE-SHA256_DIGEST_LENGTH], digestResp)
-        CheckError(err, "SHandshake Generate S2 HMACsha256 signatureResp")
-        DumpBuffer("SHandshake signatureResp", signatureResp, 0)
-        for index, b := range signatureResp {
-            s2[RTMP_SIG_SIZE-SHA256_DIGEST_LENGTH+index] = b
-        }
-    } else {
-        // just echo c1
-        logger.ModulePrintf(logHandler, log.LOG_LEVEL_WARNING, "just echoing c1 len(%d)", len(c1))
-        s2 = make([]byte, RTMP_SIG_SIZE)
-        copy(s2, c1)
-    }
+		// Generate S2
+		signatureResp, inErr := HMACsha256(s2[:RTMP_SIG_SIZE-SHA256_DIGEST_LENGTH], digestResp)
+		err = inErr
+		CheckError(err, "SHandshake Generate S2 HMACsha256 signatureResp")
+		DumpBuffer("SHandshake signatureResp", signatureResp, 0)
+		for index, b := range signatureResp {
+			s2[RTMP_SIG_SIZE-SHA256_DIGEST_LENGTH+index] = b
+		}
+	} else {
+		// just echo c1
+		logger.ModulePrintf(logHandler, log.LOG_LEVEL_WARNING, "just echoing c1 len(%d)", len(c1))
+		// s2 = make([]byte, RTMP_SIG_SIZE)
+		copy(s2, c1)
+	}
 
 	// Send S2
 	_, err = bw.Write(s2)
@@ -380,12 +457,14 @@ func SHandshake(c net.Conn, br *bufio.Reader, bw *bufio.Writer, timeout time.Dur
 	if timeout > 0 {
 		c.SetReadDeadline(time.Now().Add(timeout))
 	}
-	c2 := make([]byte, RTMP_SIG_SIZE)
+	c2 := newRtmpSigByteSlice()
+	defer putRtmpSigByteSlicePool(c2)
 	_, err = io.ReadAtLeast(br, c2, RTMP_SIG_SIZE)
 	CheckError(err, "SHandshake() Read C2")
 	// TODO: check C2
 	if timeout > 0 {
 		c.SetDeadline(time.Time{})
 	}
+
 	return
 }

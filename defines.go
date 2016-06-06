@@ -13,8 +13,38 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
+	"math"
 	"time"
 )
+
+var (
+	byteSlicePoolLock sync.Mutex
+	byteSlicePool map[uint32]sync.Pool
+)
+
+func getByteSlicePool(size uint32) *sync.Pool{
+	index := uint32(math.Floor(math.Log2(float64(size))))
+	byteSlicePoolLock.Lock()
+	s, _ := byteSlicePool[index]
+	byteSlicePoolLock.Unlock()
+	return &s
+}
+
+func getByteSlice(size uint32) []byte {
+	pool := getByteSlicePool(size)
+	if v := pool.Get(); v != nil {
+		slice := v.([]byte)
+		return slice[:size]
+	}
+	return make([]byte, size)
+}
+
+func putByteSlice(slice []byte) {
+	capacity := uint32(cap(slice))
+	pool := getByteSlicePool(capacity)
+	pool.Put(slice)
+}
 
 var DefaultObjectEncoding uint = amf.AMF0
 var logger *log.Logger = log.NewStderrLogger()
@@ -48,8 +78,14 @@ const (
 	CS_ID_PROTOCOL_CONTROL = uint32(2)
 	CS_ID_COMMAND          = uint32(3)
 	CS_ID_USER_CONTROL     = uint32(4)
-	CS_ID_VIDEO             = uint32(5)
-	CS_ID_AUDIO             = uint32(6)
+	CS_ID_VIDEO            = uint32(5)
+	CS_ID_AUDIO            = uint32(6)
+	CS_ID_FIRSTCHANNEL		 = uint32(7)
+)
+
+const (
+	RTMP_COMMAND_CONNECT = "connect"
+	RTMP_COMMAND_CREATE_STREAM = "createStream"
 )
 
 // Message type
@@ -215,7 +251,7 @@ const (
 	SHARED_OBJECT_AMF0 = uint8(19)
 	SHARED_OBJECT_AMF3 = uint8(16)
 
-	INFO_TYPE			= uint8(12)
+	INFO_TYPE = uint8(12)
 
 	// Data message
 	//
@@ -449,12 +485,13 @@ func (rtmpUrl *RtmpURL) App() string {
 }
 
 func (rtmpUrl *RtmpURL) Host() string {
-	return rtmpUrl.host;
+	return rtmpUrl.host
 }
 
 func (rtmpUrl *RtmpURL) Port() uint16 {
-	return rtmpUrl.port;
+	return rtmpUrl.port
 }
+
 // Dump buffer
 func DumpBuffer(name string, data []byte, ind int) {
 	if logger.ModuleLevelCheck(logHandler, log.LOG_LEVEL_DEBUG) {
@@ -486,14 +523,14 @@ func ReadByteFromNetwork(r Reader) (b byte, err error) {
 	for {
 		b, err = r.ReadByte()
 		if err == nil {
-			return
+			break
 		}
 		netErr, ok := err.(net.Error)
 		if !ok {
-			return
+			break
 		}
 		if !netErr.Temporary() {
-			return
+			break
 		}
 		logger.ModulePrintln(logHandler, log.LOG_LEVEL_DEBUG,
 			"ReadByteFromNetwork block")
@@ -511,14 +548,14 @@ func ReadAtLeastFromNetwork(r Reader, buf []byte, min int) (n int, err error) {
 	for {
 		n, err = io.ReadAtLeast(r, buf, min)
 		if err == nil {
-			return
+			break
 		}
 		netErr, ok := err.(net.Error)
 		if !ok {
-			return
+			break
 		}
 		if !netErr.Temporary() {
-			return
+			break
 		}
 		logger.ModulePrintln(logHandler, log.LOG_LEVEL_DEBUG,
 			"ReadAtLeastFromNetwork !!!!!!!!!!!!!!!!!!")
@@ -534,7 +571,7 @@ func ReadAtLeastFromNetwork(r Reader, buf []byte, min int) (n int, err error) {
 func CopyNFromNetwork(dst Writer, src Reader, n int64) (written int64, err error) {
 	// return io.CopyN(dst, src, n)
 
-	buf := make([]byte, 4096)
+	buf := getByteSlice(4096)
 	for written < n {
 		l := len(buf)
 		if d := n - written; d < int64(l) {
@@ -631,14 +668,14 @@ func FlushToNetwork(w *bufio.Writer) (err error) {
 	for {
 		err = w.Flush()
 		if err == nil {
-			return
+			break
 		}
 		netErr, ok := err.(net.Error)
 		if !ok {
-			return
+			break
 		}
 		if !netErr.Temporary() {
-			return
+			break
 		}
 		logger.ModulePrintln(logHandler, log.LOG_LEVEL_DEBUG,
 			"FlushToNetwork !!!!!!!!!!!!!!!!!!")

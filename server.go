@@ -16,7 +16,7 @@ type Server struct {
 	listener    net.Listener
 	network     string
 	bindAddress string
-	exit        bool
+	exit        chan bool
 	handler     ServerHandler
 }
 
@@ -25,7 +25,7 @@ func NewServer(network string, bindAddress string, handler ServerHandler) (*Serv
 	server := &Server{
 		network:     network,
 		bindAddress: bindAddress,
-		exit:        false,
+		exit:        make(chan bool),
 		handler:     handler,
 	}
 	var err error
@@ -43,23 +43,25 @@ func NewServer(network string, bindAddress string, handler ServerHandler) (*Serv
 func (server *Server) Close() {
 	logger.ModulePrintln(logHandler, log.LOG_LEVEL_TRACE,
 		"Stop server")
-	server.exit = true
-	server.listener.Close()
 }
 
 func (server *Server) mainLoop() {
-	for !server.exit {
-		c, err := server.listener.Accept()
-		if err != nil {
-			if server.exit {
-				break
+	for {
+		select {
+		case <-server.exit:
+			server.listener.Close()
+			return
+		default:
+			c, err := server.listener.Accept()
+			if err != nil {
+				logger.ModulePrintln(logHandler, log.LOG_LEVEL_WARNING,
+					"SocketServer listener error:", err)
+				server.rebind()
 			}
-			logger.ModulePrintln(logHandler, log.LOG_LEVEL_WARNING,
-				"SocketServer listener error:", err)
-			server.rebind()
-		}
-		if c != nil {
-			go server.Handshake(c)
+			if c != nil {
+				go server.Handshake(c)
+			}
+
 		}
 	}
 }

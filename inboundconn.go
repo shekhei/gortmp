@@ -67,13 +67,14 @@ type inboundConn struct {
 }
 
 func NewInboundConn(c net.Conn, br *bufio.Reader, bw *bufio.Writer,
-	authHandler InboundAuthHandler, maxChannelNumber int) (InboundConn, error) {
+	authHandler InboundAuthHandler, maxChannelNumber uint32) (InboundConn, error) {
 	ibConn := &inboundConn{
 		authHandler: authHandler,
 		status:      INBOUND_CONN_STATUS_CLOSE,
 		streams:     make(map[uint32]*inboundStream),
 	}
 	ibConn.conn = NewConn(c, br, bw, ibConn, maxChannelNumber)
+	ibConn.conn.StartLoop()
 	return ibConn, nil
 }
 
@@ -93,10 +94,10 @@ func (ibConn *inboundConn) OnReceived(conn Conn, message *Message) {
 func (ibConn *inboundConn) OnReceivedRtmpCommand(conn Conn, command *Command) {
 	command.Dump()
 	switch command.Name {
-	case "connect":
+	case RTMP_COMMAND_CONNECT:
 		ibConn.onConnect(command)
 		// Connect from client
-	case "createStream":
+	case RTMP_COMMAND_CREATE_STREAM:
 		// Create a new stream
 		ibConn.onCreateStream(command)
 	default:
@@ -108,14 +109,14 @@ func (ibConn *inboundConn) OnReceivedRtmpCommand(conn Conn, command *Command) {
 func (ibConn *inboundConn) OnClosed(conn Conn) {
 	ibConn.status = INBOUND_CONN_STATUS_CLOSE
 	ibConn.handler.OnStatus(ibConn)
-    ibConn.Close()
+	ibConn.Close()
 }
 
 // Close a connection
 func (ibConn *inboundConn) Close() {
 	for _, stream := range ibConn.streams {
 		stream.Close()
-        ibConn.onCloseStream(stream)
+		ibConn.onCloseStream(stream)
 	}
 	time.Sleep(time.Second)
 	ibConn.status = INBOUND_CONN_STATUS_CLOSE
@@ -234,6 +235,7 @@ func (ibConn *inboundConn) onCreateStream(cmd *Command) {
 			"outboundConn::ReceivedCommand() CreateMediaChunkStream err:", err)
 		return
 	}
+	fmt.Printf("OnCreateStream, cmd %v\n", cmd)
 	stream := &inboundStream{
 		conn:          ibConn,
 		chunkStreamID: newChunkStream.ID,

@@ -27,7 +27,7 @@ type Conn interface {
 	CreateChunkStream(ID uint32) (*OutboundChunkStream, error)
 	CloseChunkStream(ID uint32)
 	NewTransactionID() uint32
-    Id() uint32
+	Id() uint32
 	CreateMediaChunkStream() (*OutboundChunkStream, error)
 	CloseMediaChunkStream(id uint32)
 	SetStreamBufferSize(streamId uint32, size uint32)
@@ -37,6 +37,7 @@ type Conn interface {
 	SetPeerBandwidth(peerBandwidth uint32, limitType byte)
 	SetChunkSize(chunkSize uint32)
 	SendUserControlMessage(eventId uint16)
+	StartLoop()
 }
 
 // Connection handler
@@ -99,11 +100,14 @@ type conn struct {
 	outBandwidthLimit uint8
 
 	// Media chunk stream ID
-	mediaChunkStreamIDAllocator       []bool
+	// mediaChunkStreamIDAllocator       []bool
 	mediaChunkStreamIDAllocatorLocker sync.Mutex
+	maxChannelNumber uint32
+	nextChannelNumber uint32
 
 	// Closed
-	closed bool
+	closingLock sync.Mutex
+	closed      bool
 
 	// Handler
 	handler ConnHandler
@@ -117,32 +121,35 @@ type conn struct {
 	lastTransactionID uint32
 
 	// Error
-	err error
-    connId uint32
+	err    error
+	connId uint32
 }
 
 // Create new connection
-func NewConn(c net.Conn, br *bufio.Reader, bw *bufio.Writer, handler ConnHandler, maxChannelNumber int) Conn {
+func NewConn(c net.Conn, br *bufio.Reader, bw *bufio.Writer, handler ConnHandler, maxChannelNumber uint32) Conn {
 	conn := &conn{
-		c:                           c,
-		br:                          br,
-		bw:                          bw,
-		outChunkStreams:             make(map[uint32]*OutboundChunkStream),
-		inChunkStreams:              make(map[uint32]*InboundChunkStream),
-		highPriorityMessageQueue:    make(chan *Message, DEFAULT_HIGH_PRIORITY_BUFFER_SIZE),
-		middlePriorityMessageQueue:  make(chan *Message, DEFAULT_MIDDLE_PRIORITY_BUFFER_SIZE),
-		lowPriorityMessageQueue:     make(chan *Message, DEFAULT_LOW_PRIORITY_BUFFER_SIZE),
-		inChunkSize:                 DEFAULT_CHUNK_SIZE,
-		outChunkSize:                DEFAULT_CHUNK_SIZE,
-		inWindowSize:                DEFAULT_WINDOW_SIZE,
-		outWindowSize:               DEFAULT_WINDOW_SIZE,
-		inBandwidth:                 DEFAULT_WINDOW_SIZE,
-		outBandwidth:                DEFAULT_WINDOW_SIZE,
-		inBandwidthLimit:            BINDWIDTH_LIMIT_DYNAMIC,
-		outBandwidthLimit:           BINDWIDTH_LIMIT_DYNAMIC,
-		handler:                     handler,
-        connId:                      <- connIdGen.Next,
-		mediaChunkStreamIDAllocator: make([]bool, maxChannelNumber),
+		c:                          c,
+		br:                         br,
+		bw:                         bw,
+		outChunkStreams:            make(map[uint32]*OutboundChunkStream),
+		inChunkStreams:             make(map[uint32]*InboundChunkStream),
+		highPriorityMessageQueue:   make(chan *Message, DEFAULT_HIGH_PRIORITY_BUFFER_SIZE),
+		middlePriorityMessageQueue: make(chan *Message, DEFAULT_MIDDLE_PRIORITY_BUFFER_SIZE),
+		lowPriorityMessageQueue:    make(chan *Message, DEFAULT_LOW_PRIORITY_BUFFER_SIZE),
+		inChunkSize:                DEFAULT_CHUNK_SIZE,
+		outChunkSize:               DEFAULT_CHUNK_SIZE,
+		inWindowSize:               DEFAULT_WINDOW_SIZE,
+		outWindowSize:              DEFAULT_WINDOW_SIZE,
+		inBandwidth:                DEFAULT_WINDOW_SIZE,
+		outBandwidth:               DEFAULT_WINDOW_SIZE,
+		inBandwidthLimit:           BINDWIDTH_LIMIT_DYNAMIC,
+		outBandwidthLimit:          BINDWIDTH_LIMIT_DYNAMIC,
+		handler:                    handler,
+		connId:                     <-connIdGen.Next,
+		// mediaChunkStreamIDAllocator: make([]bool, maxChannelNumber),
+		maxChannelNumber:						maxChannelNumber,
+		// TODO implement a sorted slice that stores reusable channel numbers
+		nextChannelNumber:					CS_ID_FIRSTCHANNEL, // starts from 3
 	}
 	// Create "Protocol control chunk stream"
 	conn.outChunkStreams[CS_ID_PROTOCOL_CONTROL] = NewOutboundChunkStream(CS_ID_PROTOCOL_CONTROL)
@@ -150,17 +157,20 @@ func NewConn(c net.Conn, br *bufio.Reader, bw *bufio.Writer, handler ConnHandler
 	conn.outChunkStreams[CS_ID_COMMAND] = NewOutboundChunkStream(CS_ID_COMMAND)
 	// Create "User control chunk stream"
 	conn.outChunkStreams[CS_ID_USER_CONTROL] = NewOutboundChunkStream(CS_ID_USER_CONTROL)
-    conn.outChunkStreams[CS_ID_VIDEO] = NewOutboundChunkStream(CS_ID_VIDEO)
-    conn.outChunkStreams[CS_ID_AUDIO] = NewOutboundChunkStream(CS_ID_AUDIO)
+	conn.outChunkStreams[CS_ID_VIDEO] = NewOutboundChunkStream(CS_ID_VIDEO)
+	conn.outChunkStreams[CS_ID_AUDIO] = NewOutboundChunkStream(CS_ID_AUDIO)
 
-
-	go conn.sendLoop()
-	go conn.readLoop()
 	return conn
 }
 
-func (conn *conn ) Id() (uint32){
-    return conn.connId
+func (conn *conn) StartLoop() {
+	// some data race is detected, so removing it from the NewConn
+	go conn.sendLoop()
+	go conn.readLoop()
+}
+
+func (conn *conn) Id() uint32 {
+	return conn.connId
 }
 
 // Send high priority message in continuous chunks
@@ -240,6 +250,12 @@ func (conn *conn) checkAndSendHighPriorityMessage() {
 	}
 }
 
+func (conn *conn) isClosed() bool {
+	conn.closingLock.Lock()
+	defer conn.closingLock.Unlock()
+	return conn.closed
+}
+
 // send loop
 func (conn *conn) sendLoop() {
 	defer func() {
@@ -250,7 +266,9 @@ func (conn *conn) sendLoop() {
 		}
 		conn.Close()
 	}()
-	for !conn.closed {
+	timer := time.NewTimer(time.Second)
+	for !conn.isClosed() {
+		timer.Reset(time.Second)
 		select {
 		case message := <-conn.highPriorityMessageQueue:
 			// Send all high priority messages
@@ -263,10 +281,11 @@ func (conn *conn) sendLoop() {
 			// Check high priority message queue first
 			conn.checkAndSendHighPriorityMessage()
 			conn.sendMessage(message)
-		case <-time.After(time.Second):
+		case <-timer.C:
 			// Check close
 		}
 	}
+	timer.Stop()
 }
 
 // read loop
@@ -288,7 +307,7 @@ func (conn *conn) readLoop() {
 	var found bool
 	var chunkstream *InboundChunkStream
 	var remain uint32
-	for !conn.closed {
+	for !conn.isClosed() {
 		// Read base header
 		n, vfmt, csi, err := ReadBaseHeader(conn.br)
 		CheckError(err, "ReadBaseHeader")
@@ -409,9 +428,7 @@ func (conn *conn) readLoop() {
 				n64, err = io.CopyN(message.Buf, conn.br, int64(remain))
 				if err == nil {
 					conn.inBytes += uint32(n64)
-					if remain <= uint32(n64) {
-						break
-					} else {
+					if remain > uint32(n64) {
 						remain -= uint32(n64)
 						logger.ModulePrintf(logHandler, log.LOG_LEVEL_TRACE,
 							"Unfinish message continue copy remain: %d\n", remain)
@@ -452,8 +469,9 @@ func (conn *conn) error(err error, desc string) {
 
 func (conn *conn) Close() {
 	//	panic(errors.New("Closed"))
-
+	conn.closingLock.Lock()
 	conn.closed = true
+	conn.closingLock.Unlock()
 	conn.c.Close()
 }
 
@@ -489,18 +507,20 @@ func (conn *conn) CloseChunkStream(id uint32) {
 }
 
 func (conn *conn) CreateMediaChunkStream() (*OutboundChunkStream, error) {
-	var newChunkStreamID uint32
+	// var newChunkStreamID uint32
 	conn.mediaChunkStreamIDAllocatorLocker.Lock()
-	for index, occupited := range conn.mediaChunkStreamIDAllocator {
-		if !occupited {
-			newChunkStreamID = uint32((index+1)*6 + 2)
-			logger.ModulePrintf(logHandler, log.LOG_LEVEL_DEBUG,
-				"index: %d, newChunkStreamID: %d\n", index, newChunkStreamID)
-			// since allocate a newChunkStreamID, why not set the cocupited to true
-			conn.mediaChunkStreamIDAllocator[index] = true
-			break
-		}
-	}
+	newChunkStreamID := uint32(conn.nextChannelNumber)
+	conn.nextChannelNumber+=1
+	// for index, occupited := range conn.mediaChunkStreamIDAllocator {
+	// 	if !occupited {
+	// 		newChunkStreamID = uint32((index+1)*6 + 2)
+	// 		logger.ModulePrintf(logHandler, log.LOG_LEVEL_DEBUG,
+	// 			"index: %d, newChunkStreamID: %d\n", index, newChunkStreamID)
+	// 		// since allocate a newChunkStreamID, why not set the cocupited to true
+	// 		conn.mediaChunkStreamIDAllocator[index] = true
+	// 		break
+	// 	}
+	// }
 	conn.mediaChunkStreamIDAllocatorLocker.Unlock()
 	if newChunkStreamID == 0 {
 		return nil, errors.New("No more chunk stream ID to allocate")
@@ -525,10 +545,10 @@ func (conn *conn) InboundChunkStream(id uint32) (chunkStream *InboundChunkStream
 
 func (conn *conn) CloseMediaChunkStream(id uint32) {
 	// and the id is not the index of Allocator slice
-	index := (id - 2) / 6 - 1
-	conn.mediaChunkStreamIDAllocatorLocker.Lock()
-	conn.mediaChunkStreamIDAllocator[index] = false
-	conn.mediaChunkStreamIDAllocatorLocker.Unlock()
+	// index := (id-2)/6 - 1
+	// conn.mediaChunkStreamIDAllocatorLocker.Lock()
+	// conn.mediaChunkStreamIDAllocator[index] = false
+	// conn.mediaChunkStreamIDAllocatorLocker.Unlock()
 	conn.CloseChunkStream(id)
 }
 

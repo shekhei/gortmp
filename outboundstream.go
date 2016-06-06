@@ -6,6 +6,7 @@ import (
 	"errors"
 	"github.com/zhangpeihao/goamf"
 	"github.com/zhangpeihao/log"
+	"sync"
 )
 
 type OutboundStreamHandler interface {
@@ -19,6 +20,7 @@ type OutboundStreamHandler interface {
 // messages.
 type outboundStream struct {
 	id            uint32
+	connLock      sync.Mutex
 	conn          OutboundConn
 	chunkStreamID uint32
 	handler       OutboundStreamHandler
@@ -99,8 +101,7 @@ func (stream *outboundStream) Close() {
 		return
 	}
 	message.Dump("closeStream")
-	conn := stream.conn.Conn()
-	conn.Send(message)
+	stream.outConn().Send(message)
 }
 
 // Send audio data
@@ -117,8 +118,6 @@ func (stream *outboundStream) SendVideoData(data []byte) error {
 func (stream *outboundStream) Seek(offset uint32) {}
 
 func (stream *outboundStream) Publish(streamName, howToPublish string) (err error) {
-	conn := stream.conn.Conn()
-	// Create publish command
 	cmd := &Command{
 		IsFlex:        true,
 		Name:          "publish",
@@ -139,12 +138,17 @@ func (stream *outboundStream) Publish(streamName, howToPublish string) (err erro
 		return
 	}
 	message.Dump("publish")
+	return stream.outConn().Send(message)
+}
 
-	return conn.Send(message)
+func (stream *outboundStream) outConn() OutboundConn {
+	stream.connLock.Lock()
+	defer stream.connLock.Unlock()
+	return stream.conn
 }
 
 func (stream *outboundStream) Play(streamName string, start, duration *uint32, reset *bool) (err error) {
-	conn := stream.conn.Conn()
+	// conn := stream.conn.Conn()
 	// Keng-die: in stream transaction ID always been 0
 	// Create play command
 	cmd := &Command{
@@ -181,8 +185,9 @@ func (stream *outboundStream) Play(streamName string, start, duration *uint32, r
 		return
 	}
 	message.Dump("play")
-
+	conn := stream.outConn()
 	err = conn.Send(message)
+
 	if err != nil {
 		return
 	}
@@ -192,12 +197,12 @@ func (stream *outboundStream) Play(streamName string, start, duration *uint32, r
 	if stream.bufferLength < MIN_BUFFER_LENGTH {
 		stream.bufferLength = MIN_BUFFER_LENGTH
 	}
-	stream.conn.Conn().SetStreamBufferSize(stream.id, stream.bufferLength)
+	conn.Conn().SetStreamBufferSize(stream.id, stream.bufferLength)
 	return nil
 }
 
 func (stream *outboundStream) Call(name string, customParameters ...interface{}) (err error) {
-	conn := stream.conn.Conn()
+
 	// Create play command
 	cmd := &Command{
 		IsFlex:        false,
@@ -217,6 +222,7 @@ func (stream *outboundStream) Call(name string, customParameters ...interface{})
 	}
 	message.Dump(name)
 
+	conn := stream.outConn()
 	err = conn.Send(message)
 	if err != nil {
 		return
@@ -227,7 +233,7 @@ func (stream *outboundStream) Call(name string, customParameters ...interface{})
 	if stream.bufferLength < MIN_BUFFER_LENGTH {
 		stream.bufferLength = MIN_BUFFER_LENGTH
 	}
-	stream.conn.Conn().SetStreamBufferSize(stream.id, stream.bufferLength)
+	conn.Conn().SetStreamBufferSize(stream.id, stream.bufferLength)
 	return nil
 }
 
@@ -236,16 +242,15 @@ func (stream *outboundStream) Received(message *Message) bool {
 		return false
 	}
 	var err error
-    if message.Type == DATA_AMF0 || message.Type == DATA_AMF3{ 
-			logger.ModulePrintln(logHandler, log.LOG_LEVEL_WARNING,
-				"outboundStream::Received() DATA:", message)
+	if message.Type == DATA_AMF0 || message.Type == DATA_AMF3 {
+		logger.ModulePrintln(logHandler, log.LOG_LEVEL_WARNING,
+			"outboundStream::Received() DATA:", message)
 
-    }
+	}
 	if message.Type == COMMAND_AMF0 || message.Type == COMMAND_AMF3 {
 		cmd := &Command{}
-			logger.ModulePrintln(logHandler, log.LOG_LEVEL_WARNING,
-				"outboundStream::Received() :", message)
-
+		logger.ModulePrintln(logHandler, log.LOG_LEVEL_WARNING,
+			"outboundStream::Received() :", message)
 
 		if message.Type == COMMAND_AMF3 {
 			cmd.IsFlex = true
@@ -340,19 +345,19 @@ func (stream *outboundStream) Attach(handler OutboundStreamHandler) {
 func (stream *outboundStream) PublishAudioData(data []byte, deltaTimestamp uint32) (err error) {
 	message := NewMessage(stream.chunkStreamID, AUDIO_TYPE, stream.id, AUTO_TIMESTAMP, data)
 	message.Timestamp = deltaTimestamp
-	return stream.conn.Send(message)
+	return stream.outConn().Send(message)
 }
 
 // Publish video data
 func (stream *outboundStream) PublishVideoData(data []byte, deltaTimestamp uint32) (err error) {
 	message := NewMessage(stream.chunkStreamID, VIDEO_TYPE, stream.id, AUTO_TIMESTAMP, data)
 	message.Timestamp = deltaTimestamp
-	return stream.conn.Send(message)
+	return stream.outConn().Send(message)
 }
 
 // Publish data
 func (stream *outboundStream) PublishData(dataType uint8, data []byte, deltaTimestamp uint32) (err error) {
 	message := NewMessage(stream.chunkStreamID, dataType, stream.id, AUTO_TIMESTAMP, data)
 	message.Timestamp = deltaTimestamp
-	return stream.conn.Send(message)
+	return stream.outConn().Send(message)
 }

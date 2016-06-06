@@ -11,6 +11,7 @@ import (
 	"github.com/zhangpeihao/goamf"
 	"github.com/zhangpeihao/log"
 	"net"
+	"sync"
 	"time"
 )
 
@@ -60,6 +61,7 @@ type outboundConn struct {
 	url          string
 	rtmpURL      RtmpURL
 	status       uint
+	lock         *sync.RWMutex
 	err          error
 	handler      OutboundConnHandler
 	conn         Conn
@@ -68,7 +70,7 @@ type outboundConn struct {
 }
 
 // Connect to FMS server, and finish handshake process
-func Dial(url string, handler OutboundConnHandler, maxChannelNumber int) (OutboundConn, error) {
+func Dial(url string, handler OutboundConnHandler, maxChannelNumber uint32) (OutboundConn, error) {
 	rtmpURL, err := ParseURL(url)
 	if err != nil {
 		return nil, err
@@ -92,7 +94,7 @@ func Dial(url string, handler OutboundConnHandler, maxChannelNumber int) (Outbou
 	}
 	br := bufio.NewReader(c)
 	bw := bufio.NewWriter(c)
-	timeout := time.Duration(10*time.Second)
+	timeout := time.Duration(10 * time.Second)
 	err = Handshake(c, br, bw, timeout)
 	//err = HandshakeSample(c, br, bw, timeout)
 	if err == nil {
@@ -103,11 +105,13 @@ func Dial(url string, handler OutboundConnHandler, maxChannelNumber int) (Outbou
 			rtmpURL:      rtmpURL,
 			handler:      handler,
 			status:       OUTBOUND_CONN_STATUS_HANDSHAKE_OK,
+			lock:         &sync.RWMutex{},
 			transactions: make(map[uint32]string),
 			streams:      make(map[uint32]OutboundStream),
 		}
 		obConn.handler.OnStatus(obConn)
 		obConn.conn = NewConn(c, br, bw, obConn, maxChannelNumber)
+		obConn.conn.StartLoop()
 		return obConn, nil
 	}
 
@@ -115,7 +119,7 @@ func Dial(url string, handler OutboundConnHandler, maxChannelNumber int) (Outbou
 }
 
 // Connect to FMS server, and finish handshake process
-func NewOutbounConn(c net.Conn, url string, handler OutboundConnHandler, maxChannelNumber int) (OutboundConn, error) {
+func NewOutbounConn(c net.Conn, url string, handler OutboundConnHandler, maxChannelNumber uint32) (OutboundConn, error) {
 	rtmpURL, err := ParseURL(url)
 	if err != nil {
 		return nil, err
@@ -136,10 +140,12 @@ func NewOutbounConn(c net.Conn, url string, handler OutboundConnHandler, maxChan
 		rtmpURL:      rtmpURL,
 		handler:      handler,
 		status:       OUTBOUND_CONN_STATUS_HANDSHAKE_OK,
+		lock:         &sync.RWMutex{},
 		transactions: make(map[uint32]string),
 		streams:      make(map[uint32]OutboundStream),
 	}
 	obConn.conn = NewConn(c, br, bw, obConn, maxChannelNumber)
+	obConn.conn.StartLoop()
 	return obConn, nil
 }
 
@@ -156,10 +162,10 @@ func (obConn *outboundConn) Connect(extendedParameters ...interface{}) (err erro
 	// Create connect command
 	buf := new(bytes.Buffer)
 	// Command name
-	_, err = amf.WriteString(buf, "connect")
+	_, err = amf.WriteString(buf, RTMP_COMMAND_CONNECT)
 	CheckError(err, "Connect() Write name: connect")
 	transactionID := obConn.conn.NewTransactionID()
-	obConn.transactions[transactionID] = "connect"
+	obConn.transactions[transactionID] = RTMP_COMMAND_CONNECT
 	_, err = amf.WriteDouble(buf, float64(transactionID))
 	CheckError(err, "Connect() Write transaction ID")
 	_, err = amf.WriteObjectMarker(buf)
@@ -234,17 +240,21 @@ func (obConn *outboundConn) Connect(extendedParameters ...interface{}) (err erro
 		Size:          uint32(buf.Len()),
 		Buf:           buf,
 	}
-	connectMessage.Dump("connect")
+	connectMessage.Dump(RTMP_COMMAND_CONNECT)
+	obConn.lock.Lock()
 	obConn.status = OUTBOUND_CONN_STATUS_CONNECT
+	obConn.lock.Unlock()
 	return obConn.conn.Send(connectMessage)
 }
 
 // Close a connection
 func (obConn *outboundConn) Close() {
+	obConn.lock.Lock()
+	obConn.status = OUTBOUND_CONN_STATUS_CLOSE
+	obConn.lock.Unlock()
 	for _, stream := range obConn.streams {
 		stream.Close()
 	}
-	obConn.status = OUTBOUND_CONN_STATUS_CLOSE
 	go func() {
 		time.Sleep(time.Second)
 		obConn.conn.Close()
@@ -257,13 +267,17 @@ func (obConn *outboundConn) URL() string {
 }
 
 // Connection status
-func (obConn *outboundConn) Status() (uint, error) {
-	return obConn.status, obConn.err
+func (obConn *outboundConn) Status() (status uint, err error) {
+	obConn.lock.RLock()
+	status = obConn.status
+	err = obConn.err
+	obConn.lock.RUnlock()
+	return
 }
 
 // Callback when recieved message. Audio & Video data
 func (obConn *outboundConn) OnReceived(conn Conn, message *Message) {
-    stream, found := obConn.streams[message.StreamID]
+	stream, found := obConn.streams[message.StreamID]
 	if found {
 		if !stream.Received(message) {
 			obConn.handler.OnReceived(conn, message)
@@ -281,7 +295,7 @@ func (obConn *outboundConn) OnReceivedRtmpCommand(conn Conn, command *Command) {
 		transaction, found := obConn.transactions[command.TransactionID]
 		if found {
 			switch transaction {
-			case "connect":
+			case RTMP_COMMAND_CONNECT:
 				if command.Objects != nil && len(command.Objects) >= 2 {
 					information, ok := command.Objects[1].(amf.Object)
 					if ok {
@@ -290,14 +304,18 @@ func (obConn *outboundConn) OnReceivedRtmpCommand(conn Conn, command *Command) {
 							// Connect OK
 							//time.Sleep(time.Duration(200) * time.Millisecond)
 							obConn.conn.SetWindowAcknowledgementSize()
+							obConn.lock.Lock()
 							obConn.status = OUTBOUND_CONN_STATUS_CONNECT_OK
+							obConn.lock.Unlock()
 							obConn.handler.OnStatus(obConn)
+							obConn.lock.Lock()
 							obConn.status = OUTBOUND_CONN_STATUS_CREATE_STREAM
+							obConn.lock.Unlock()
 							obConn.CreateStream()
 						}
 					}
 				}
-			case "createStream":
+			case RTMP_COMMAND_CREATE_STREAM:
 				if command.Objects != nil && len(command.Objects) >= 2 {
 					streamID, ok := command.Objects[1].(float64)
 					if ok {
@@ -313,7 +331,9 @@ func (obConn *outboundConn) OnReceivedRtmpCommand(conn Conn, command *Command) {
 							chunkStreamID: newChunkStream.ID,
 						}
 						obConn.streams[stream.ID()] = stream
+						obConn.lock.Lock()
 						obConn.status = OUTBOUND_CONN_STATUS_CREATE_STREAM_OK
+						obConn.lock.Unlock()
 						obConn.handler.OnStatus(obConn)
 						obConn.handler.OnStreamCreated(obConn, stream)
 					}
@@ -337,7 +357,9 @@ func (obConn *outboundConn) OnReceivedRtmpCommand(conn Conn, command *Command) {
 
 // Connection closed
 func (obConn *outboundConn) OnClosed(conn Conn) {
+	obConn.lock.Lock()
 	obConn.status = OUTBOUND_CONN_STATUS_CLOSE
+	obConn.lock.Unlock()
 	obConn.handler.OnStatus(obConn)
 	obConn.handler.OnClosed(conn)
 }
@@ -356,7 +378,7 @@ func (obConn *outboundConn) CreateStream() (err error) {
 	transactionID := obConn.conn.NewTransactionID()
 	cmd := &Command{
 		IsFlex:        false,
-		Name:          "createStream",
+		Name:          RTMP_COMMAND_CREATE_STREAM,
 		TransactionID: transactionID,
 		Objects:       make([]interface{}, 1),
 	}
@@ -364,7 +386,7 @@ func (obConn *outboundConn) CreateStream() (err error) {
 	buf := new(bytes.Buffer)
 	err = cmd.Write(buf)
 	CheckError(err, "createStream() Create command")
-	obConn.transactions[transactionID] = "createStream"
+	obConn.transactions[transactionID] = RTMP_COMMAND_CREATE_STREAM
 
 	message := &Message{
 		ChunkStreamID: CS_ID_COMMAND,
@@ -372,7 +394,7 @@ func (obConn *outboundConn) CreateStream() (err error) {
 		Size:          uint32(buf.Len()),
 		Buf:           buf,
 	}
-	message.Dump("createStream")
+	message.Dump(RTMP_COMMAND_CREATE_STREAM)
 	return obConn.conn.Send(message)
 }
 

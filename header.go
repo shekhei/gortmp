@@ -272,7 +272,7 @@ func (header *Header) Write(wbuf Writer) (n int, err error) {
 	default:
 		return n, errors.New("Unsupport chunk stream ID large then 65599")
 	}
-	tmpBuf := make([]byte, 4)
+	tmpBuf := getByteSlice(4)
 	var m int
 	switch header.Fmt {
 	case HEADER_FMT_FULL:
